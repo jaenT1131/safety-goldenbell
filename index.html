@@ -99,6 +99,8 @@ const SALT = "maneul-goldenbell-v3";
 const KEY = "gb2026_student_v3";
 const TKEY = "gb2026_teacher_v4";
 const MAXNUM = 20;
+const SYNC_URL = "https://script.google.com/macros/s/AKfycbzqcybAWuAEAwSFlVVQWQxKcZKPrlWFWKiOYnzp3Zha1qlZT97iAg7WnOkDE7j3bmIa/exec";   // 구글 Apps Script 웹 앱 주소 (학생 기록 자동 전송)
+const SYNC_ON = /^https:\/\/script\.google\.com\//.test(SYNC_URL);
 const COMP_OFF = 40, COMP_N = 25, COMP_SPAN = 5;   // 종합문제: 5일차씩 묶어 무작위 25문제
 const NB = Math.ceil(N_DAYS/COMP_SPAN);
 const SCHED_DAYS = 14;  // 11/9 ~ 11/22
@@ -119,6 +121,39 @@ function fixS(){ if(!S.study) S.study={}; if(!S.comp) S.comp={}; if(!S.wrong) S.
 fixS();
 if(!S.study) S.study = {};
 if(!S.comp) S.comp = {};   // S.comp[b] = {best, tries, points, date}   // S.study[d] = {i: chosenKey}
+// ---------- 자동 전송 (학생 → 구글 시트) ----------
+function allCodes(){
+  if(!S.profile) return [];
+  const out=[];
+  for(let d=1; d<=N_DAYS; d++) if(S.days[d]&&S.days[d].cleared) out.push(codeFor(d));
+  Object.keys(S.comp).forEach(b=>out.push(compCode(+b)));
+  return out;
+}
+let syncState='idle', syncBusy=false;
+function paintSync(){
+  document.querySelectorAll('.syncline').forEach(el=>{
+    const pend=allCodes().filter(c=>!(S.sent||[]).includes(c)).length;
+    el.textContent = !SYNC_ON ? '' :
+      syncState==='busy' ? '☁️ 선생님께 자동으로 보내는 중…' :
+      pend===0 ? (allCodes().length?'✅ 선생님께 자동으로 전송 완료!':'') :
+      `⚠️ 아직 못 보낸 기록 ${pend}개 — 인터넷이 연결되면 자동으로 다시 보내요`;
+  });
+}
+async function syncNow(){
+  if(!SYNC_ON || syncBusy || !S.profile) return;
+  const me=S; if(!me.sent) me.sent=[];
+  const pending=allCodes().filter(c=>!me.sent.includes(c));
+  if(!pending.length){ syncState='ok'; paintSync(); return; }
+  syncBusy=true; syncState='busy'; paintSync();
+  try{
+    const r=await fetch(SYNC_URL,{method:'POST', body:JSON.stringify({codes:pending})});
+    const j=await r.json();
+    if(j&&j.ok){ pending.forEach(c=>{ if(!me.sent.includes(c)) me.sent.push(c); }); if(me.sent.length>400) me.sent=me.sent.slice(-400); persist(); syncState='ok'; }
+    else syncState='fail';
+  }catch(e){ syncState='fail'; }
+  syncBusy=false; paintSync();
+}
+window.addEventListener('online', ()=>syncNow());
 function persist(){ if(S.profile){ ROOT.profiles[S.profile.num]=S; ROOT.active=S.profile.num; } save(ROOTKEY, ROOT); }
 
 // ---------- helpers ----------
@@ -210,7 +245,8 @@ function confetti(){
 // ================= VIEWS =================
 let view='home';
 function go(v, arg){ view=v; window.scrollTo(0,0); render(arg); }
-function render(arg){
+function render(arg){ renderInner(arg); if(view!=='teacher'&&view!=='setup'&&S.profile){ paintSync(); setTimeout(syncNow, 50); } }
+function renderInner(arg){
   if(view==='teacher') return renderTeacher();
   if(view==='setup' || !S.profile) return renderSetup();
   ({home:renderHome, study:renderStudy, quiz:renderQuiz, clear:renderClear, wrong:renderWrong, cards:renderCards, codes:renderCodes, rules:renderRules, comp:renderComp, pin:renderPin})[view](arg);
@@ -291,6 +327,7 @@ function renderHome(){
       <button class="btn gold grow" onclick="${resume?'resumeQuiz()':`startDay(${nd})`}">${resume?'▶ 이어서 도전':'🔔 도전하기'}</button>
     </div>
   </div>` : `<div class="card today center"><div class="big">👑</div><h2>모든 일차를 클리어했어요!</h2><div class="muted">오답노트로 마지막 점검을 해 봐요.</div></div>`}
+  ${SYNC_ON&&allCodes().length?`<p class="syncline muted center" style="margin:-4px 0 10px"></p>`:''}
   <div class="menu" style="margin-bottom:14px">
     <button onclick="go('wrong')">📝 오답노트<small>틀렸던 ${Object.keys(S.wrong).length}문제 다시 보기</small></button>
     <button onclick="go('cards')">🃏 주관식 카드<small>${DATA.sa.length}개 · 뒤집어서 정답 확인</small></button>
@@ -464,7 +501,7 @@ function finishAll(){
 function retryReward(c){
   const g=c.gained||0; if(!g) return '';
   return `<p style="font-size:20px">다시 풀어 맞힌 ${g}문제 × ${PTS.retry} = <b style="color:var(--gold-d)">+${g*PTS.retry}점</b></p>
-    <p style="margin-bottom:6px">👇 포인트가 늘었어요! 새 인증코드를 선생님께 보내 주세요</p>
+    ${SYNC_ON?`<p class="syncline" style="font-size:18px"></p>`:`<p style="margin-bottom:6px">👇 포인트가 늘었어요! 새 인증코드를 선생님께 보내 주세요</p>`}
     <div class="codebox">${codeFor(c.day)}</div><div style="height:10px"></div>
     <button class="btn" style="width:100%;margin-bottom:8px" id="cp">📋 새 인증코드 복사하기</button>`;
 }
@@ -485,10 +522,10 @@ function renderClear(a){
       <tr><td class="l">📖 공부하기 포인트 (${studyCount(d)}문제)</td><td>+${studyCount(d)*PTS.study}</td></tr>
     </table>
     ${wrongs&&wrongs.length?`<button class="btn ghost" style="width:100%;margin-bottom:14px" id="rt">🔁 틀린 ${wrongs.length}문제 다시 풀기 (선택 · 맞힐 때마다 +${PTS.retry}점)</button>`:''}
-    <p style="margin-bottom:6px">👇 이 인증코드를 선생님께 보내 주세요</p>
-    <div class="codebox">${codeFor(d)}</div>
+    ${SYNC_ON?`<p class="syncline" style="font-size:18px">☁️ 선생님께 자동으로 보내는 중…</p>`:`<p style="margin-bottom:6px">👇 이 인증코드를 선생님께 보내 주세요</p>`}
+    <div class="codebox" ${SYNC_ON?'style="font-size:14px;opacity:.7"':''}>${codeFor(d)}</div>
     <div style="height:10px"></div>
-    <button class="btn gold" style="width:100%" id="cp">📋 인증코드 복사하기</button>
+    <button class="btn gold" style="width:100%" id="cp">📋 인증코드 복사하기${SYNC_ON?' (자동 전송이 안 될 때만)':''}</button>
     <div style="height:8px"></div><button class="btn ghost" onclick="go('home')">홈으로</button>
   </div>`;
   $('#cp').onclick=()=>copyText(codeMessage(d));
@@ -535,7 +572,8 @@ function finishComp(){
     <p class="muted">${better?(prev?`최고 기록 갱신! (전에는 ${prev.best}점)`:'첫 기록이에요!'):`최고 기록 ${r.best}점은 그대로예요. 다시 도전해 봐요!`}</p>
     ${wrongs?`<p class="muted">틀린 ${wrongs}문제는 📝 오답노트에 담았어요.</p>`:''}
     <p style="margin:6px 0">종합 ${b} 포인트: <b style="color:var(--gold-d)">${r.points}</b></p>
-    ${better?`<p style="margin-bottom:6px">👇 새 기록 인증코드를 선생님께 보내 주세요</p><div class="codebox">${compCode(b)}</div><div style="height:10px"></div>
+    ${better&&SYNC_ON?`<p class="syncline" style="font-size:18px"></p>`:''}
+    ${better?`<p style="margin-bottom:6px">${SYNC_ON?'인증코드 (자동 전송이 안 될 때만 보내요)':'👇 새 기록 인증코드를 선생님께 보내 주세요'}</p><div class="codebox">${compCode(b)}</div><div style="height:10px"></div>
     <button class="btn gold" style="width:100%" id="cp">📋 인증코드 복사하기</button><div style="height:8px"></div>`:''}
     <div class="row" style="justify-content:center"><button class="btn ghost" onclick="go('comp')">종합문제 목록</button><button class="btn" onclick="go('home')">홈으로</button></div>
   </div>`;
@@ -635,6 +673,31 @@ function saveTeacher(){
   }
 }
 function renderPin(){}
+function mergeCodes(cs){
+  let added=0, upd=0, dup=0;
+  cs.forEach(x=>{ const k=x.num+'-'+x.day; const o=T.recs[k];
+    if(!o){ T.recs[k]=x; added++; }
+    else if(x.day<=N_DAYS && ((x.study||0)>(o.study||0) || (x.rounds||0)>(o.rounds||0))){ T.recs[k]={...o, study:Math.max(x.study||0,o.study||0), rounds:Math.max(x.rounds||0,o.rounds||0)}; upd++; }
+    else if(x.day>COMP_OFF && x.first>o.first){ T.recs[k]=x; upd++; }
+    else dup++; });
+  return {added, upd, dup};
+}
+// 선생님 화면: 구글 시트에서 학생 기록을 30초마다 가져와 바로 반영
+let tPull=null, tLast='', tPullErr=false;
+async function teacherPull(manual){
+  if(!SYNC_ON) return;
+  try{
+    const r=await fetch(SYNC_URL+'?t='+Date.now()); const j=await r.json();
+    const cs=(j.codes||[]).map(parseCode).filter(Boolean);
+    const m=mergeCodes(cs); tPullErr=false;
+    tLast=new Date().toLocaleTimeString('ko-KR');
+    if(m.added||m.upd){ saveTeacher(); if(view==='teacher'&&tUnlocked&&!tTV) renderTeacher(); else if(view==='teacher'&&tTV) renderTeacher(); if(manual||m.added) toast(`새 기록 ${m.added}개${m.upd?` · 갱신 ${m.upd}개`:''} 반영!`); }
+    else if(manual) toast('새 기록이 없어요');
+  }catch(e){ tPullErr=true; if(manual) toast('기록을 가져오지 못했어요. 인터넷을 확인해 주세요'); }
+  const el=document.getElementById('pullinfo'); if(el) el.textContent=pullText();
+}
+function pullText(){ return tPullErr?'⚠️ 자동 반영 연결에 실패했어요. 잠시 후 다시 시도해요.':(tLast?`☁️ 학생 기록이 자동으로 반영돼요 · 마지막 확인 ${tLast} (30초마다)`:'☁️ 학생 기록을 불러오는 중…'); }
+function startPull(){ if(!SYNC_ON||tPull) return; teacherPull(); tPull=setInterval(()=>{ if(view==='teacher'&&tUnlocked) teacherPull(); }, 30000); }
 function teacherBackup(){
   const name=n=>T.roster[n]||`${n}번`;
   const lines=Object.keys(T.roster).sort((a,b)=>a-b).map(n=>`[명단] ${n}번 ${T.roster[n]}`);
@@ -652,7 +715,7 @@ function renderTeacher(){
   if(!tUnlocked){
     app().innerHTML=`<div class="top"><button class="btn ghost sm" onclick="go('home')">← 돌아가기</button><h2>👩‍🏫 선생님 화면</h2></div>
     <div class="card"><p class="muted">선생님 비밀번호를 입력하세요.</p><input id="pin" type="password" inputmode="numeric"><div style="height:10px"></div><button class="btn" id="ok">들어가기</button></div>`;
-    $('#ok').onclick=()=>{ if($('#pin').value===TEACHER_PIN){ tUnlocked=true; initTeacherStore(); renderTeacher(); } else toast('비밀번호가 달라요'); };
+    $('#ok').onclick=()=>{ if($('#pin').value===TEACHER_PIN){ tUnlocked=true; initTeacherStore(); renderTeacher(); startPull(); } else toast('비밀번호가 달라요'); };
     return;
   }
   // aggregate
@@ -674,8 +737,9 @@ function renderTeacher(){
   let rosterHtml=''; for(let n=1;n<=MAXNUM;n++) rosterHtml+=`<div class="row" style="flex-wrap:nowrap"><span style="min-width:42px">${n}번</span><input data-n="${n}" value="${esc(T.roster[n]||'')}" placeholder="이름"></div>`;
   const progress=rows.slice().sort((a,b)=>a.num-b.num).map(s=>`<tr><td class="l" style="white-space:nowrap">${esc(name(s.num))}</td><td><div class="mini">${Array.from({length:N_DAYS},(_,k)=>`<i class="${s.set[k+1]||''}" title="${k+1}일차"></i>`).join('')}</div></td></tr>`).join('');
   app().innerHTML=`<div class="top"><button class="btn ghost sm" onclick="tUnlocked=false;go('home')">← 나가기</button><h2>👩‍🏫 선생님 화면</h2><button class="btn gold sm" id="tv">📺 TV로 크게</button></div>
+  ${SYNC_ON?`<div class="card today row" style="margin-bottom:12px"><div class="grow" id="pullinfo">${pullText()}</div><button class="btn sm" onclick="teacherPull(true)">🔄 지금 새로고침</button></div>`:''}
   <div class="note" style="margin-bottom:12px">${tSrc==='db'?'☁️ 순위표가 이 아티팩트에 저장돼요 (선생님 계정으로 열었을 때). 다른 기기에서도 그대로 보여요.':'💾 순위표는 이 기기(브라우저)에 저장돼요. 항상 같은 기기로 들어오시고, 가끔 아래 「백업 복사」로 보관해 두세요.'}</div>
-  <div class="card"><h3 style="margin-top:0">📮 인증코드 넣기</h3>
+  <div class="card"><h3 style="margin-top:0">📮 인증코드 넣기 ${SYNC_ON?'<span class="muted" style="font-size:14px">(자동 반영이 안 된 기록만)</span>':''}</h3>
     <p class="muted">아이들이 보낸 메시지를 통째로 붙여 넣어도 돼요. 코드만 골라 읽어요. 클리어 뒤에 공부하기나 틀린 문제 다시 풀기를 더 한 아이가 코드를 다시 보내면 늘어난 포인트만 새로 반영돼요.</p>
     <textarea id="codes" placeholder="[안전골든벨] 3번 김마늘 1일차 클리어! 인증코드 GB-....-.."></textarea><div style="height:8px"></div>
     <button class="btn" id="add">순위표에 반영</button></div>
@@ -691,7 +755,7 @@ function renderTeacher(){
     // pick up names written like "3번 홍길동"
     (raw.match(/\[명단\]\s*\d{1,2}번\s+[^\s\d]{1,10}/g)||[]).forEach(m=>{ const mm=/(\d{1,2})번\s+(\S+)/.exec(m); if(mm) T.roster[+mm[1]]=mm[2]; });
     (raw.match(/(\d{1,2})번\s+([^\s\d]{1,10})\s+\d{1,2}일차/g)||[]).forEach(m=>{ const mm=/(\d{1,2})번\s+(\S+)/.exec(m); if(mm && !T.roster[+mm[1]]) T.roster[+mm[1]]=mm[2]; });
-    let upd=0; cs.forEach(x=>{ const k=x.num+'-'+x.day; const o=T.recs[k]; if(!o){ T.recs[k]=x; added++; } else if(x.day<=N_DAYS && ((x.study||0)>(o.study||0) || (x.rounds||0)>(o.rounds||0))){ T.recs[k]={...o, study:Math.max(x.study||0,o.study||0), rounds:Math.max(x.rounds||0,o.rounds||0)}; upd++; } else if(x.day>COMP_OFF && x.first>o.first){ T.recs[k]=x; upd++; } else dup++; });
+    const m=mergeCodes(cs); added=m.added; dup=m.dup; const upd=m.upd;
     saveTeacher(); toast(cs.length?`새 기록 ${added}개${upd?` · 기록 갱신 ${upd}개`:''}${dup?` · 이미 있는 ${dup}개는 건너뜀`:''}`:'올바른 인증코드를 찾지 못했어요'); renderTeacher(); };
   $('#bk').onclick=()=>copyText(teacherBackup());
   $('#sv').onclick=()=>{ document.querySelectorAll('[data-n]').forEach(i=>{ const v=i.value.trim(); if(v) T.roster[i.dataset.n]=v; else delete T.roster[i.dataset.n]; }); saveTeacher(); toast('명단을 저장했어요'); renderTeacher(); };
